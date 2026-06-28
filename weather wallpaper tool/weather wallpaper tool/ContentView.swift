@@ -19,6 +19,12 @@ struct MetalView: NSViewRepresentable {
         let sunVec = SunMath.getSunVector(date: Date(), latitude: 24.1, longitude: 120.68)
         print("🌞 當前太陽向量: \(sunVec)")
         
+        let moonVec = MoonMath.getMoonVector(date: Date(), latitude: 24.1, longitude: 120.68)
+        print("🌙 當前月球向量: \(moonVec)")
+        
+        let phase = MoonMath.getMoonPhase(date: Date())
+        print("🌒 當前月相進度: \(phase) (0=新月, 0.5=滿月)")
+        
         // 允許圖層透明
         mtkView.wantsLayer = true
         mtkView.layer?.isOpaque = false
@@ -86,19 +92,24 @@ class Coordinator: NSObject, MTKViewDelegate {
         guard let commandBuffer = commandQueue?.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
         
-        // --- 1. 計算當下太陽向量 ---
-        // (你可以把 Date() 換成其他時間來測試日出日落，例如 Date().addingTimeInterval(3600 * 8) 來快進 8 小時)
-        // 快轉 10 小時 (10小時 * 60分 * 60秒)
-        let futureDate = Date().addingTimeInterval(10 * 3600)
-        var sunVector = SunMath.getSunVector(date: futureDate, latitude: 24.1, longitude: 120.68)
+        // 1. 獲取當前即時的天體觀測數據（以台中大里座標為例）
+        var sunVector = SunMath.getSunVector(date: Date(), latitude: 24.1, longitude: 120.68)
+        var moonVector = MoonMath.getMoonVector(date: Date(), latitude: 24.1, longitude: 120.68)
+        var moonPhase = MoonMath.getMoonPhase(date: Date())
+        
+        var aspect = Float(view.drawableSize.width / view.drawableSize.height)
         
         encoder.setRenderPipelineState(pipelineState)
         
-        // --- 2. 開通數據通道：將太陽向量傳送給 GPU 的 Fragment Shader ---
-        // 我們將它放在 index: 0 的位置，長度就是一個 SIMD3<Float> 的大小
+        // 2. 開通多軌數據通道
+        // Metal 的 float3 對齊格式為 16 bytes，Swift 的 SIMD3<Float> 跨距(stride)亦為 16 bytes，兩者完美對接
         encoder.setFragmentBytes(&sunVector, length: MemoryLayout<SIMD3<Float>>.stride, index: 0)
+        encoder.setFragmentBytes(&moonVector, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+        encoder.setFragmentBytes(&moonPhase, length: MemoryLayout<Float>.size, index: 2)
         
-        // 3. 發出繪圖指令
+        encoder.setFragmentBytes(&aspect, length: MemoryLayout<Float>.size, index: 3)
+        
+        // 3. 執行繪圖
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         
         encoder.endEncoding()
