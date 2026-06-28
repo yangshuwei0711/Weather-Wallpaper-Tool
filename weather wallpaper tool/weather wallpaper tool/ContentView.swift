@@ -15,6 +15,10 @@ struct MetalView: NSViewRepresentable {
             mtkView.device = device
         }
         
+        // 測試：計算當下台中大里地區的太陽向量
+        let sunVec = SunMath.getSunVector(date: Date(), latitude: 24.1, longitude: 120.68)
+        print("🌞 當前太陽向量: \(sunVec)")
+        
         // 允許圖層透明
         mtkView.wantsLayer = true
         mtkView.layer?.isOpaque = false
@@ -77,17 +81,25 @@ class Coordinator: NSObject, MTKViewDelegate {
               let passDescriptor = view.currentRenderPassDescriptor,
               let pipelineState = self.pipelineState else { return }
         
-        // 這次我們把背景塗成完全透明，讓 Shader 自己決定顏色
         passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         
         guard let commandBuffer = commandQueue?.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
         
-        // --- 核心指令區 ---
+        // --- 1. 計算當下太陽向量 ---
+        // (你可以把 Date() 換成其他時間來測試日出日落，例如 Date().addingTimeInterval(3600 * 8) 來快進 8 小時)
+        // 快轉 10 小時 (10小時 * 60分 * 60秒)
+        let futureDate = Date().addingTimeInterval(10 * 3600)
+        var sunVector = SunMath.getSunVector(date: futureDate, latitude: 24.1, longitude: 120.68)
+        
         encoder.setRenderPipelineState(pipelineState)
-        // 告訴 GPU：畫 3 個頂點（就是我們在 Shader 寫的那個大三角形）
+        
+        // --- 2. 開通數據通道：將太陽向量傳送給 GPU 的 Fragment Shader ---
+        // 我們將它放在 index: 0 的位置，長度就是一個 SIMD3<Float> 的大小
+        encoder.setFragmentBytes(&sunVector, length: MemoryLayout<SIMD3<Float>>.stride, index: 0)
+        
+        // 3. 發出繪圖指令
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        // ------------------
         
         encoder.endEncoding()
         commandBuffer.present(drawable)
