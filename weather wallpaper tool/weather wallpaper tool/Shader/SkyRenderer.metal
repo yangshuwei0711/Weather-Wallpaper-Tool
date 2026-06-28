@@ -31,11 +31,26 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-// 3. 片段著色器 (Fragment Shader)：這就是我們未來算大氣散射的地方！
-fragment float4 fragmentMain(RasterizerData in [[stage_in]]) {
-    // 顯影測試：我們用 UV 座標的 X 與 Y 來決定紅色與綠色的強度
-    // 這會畫出一個從左上到右下變化的漂亮漸層
-    return float4(in.uv.x, in.uv.y, 0.8, 0.6); // (R, G, B, Alpha)
+// 接收端：注意我們多了一個參數 sunDirection，並且標註它來自 [[buffer(0)]]
+fragment float4 fragmentMain(RasterizerData in [[stage_in]],
+                             constant float3& sunDirection [[buffer(0)]]) {
+    
+    // 抓出太陽的高度 (Y 軸)
+    float sunHeight = sunDirection.y;
+    
+    // 定義白天的天空顏色 (明亮的淺藍色) 與晚上的天空顏色 (深邃的暗藍色)
+    float3 dayColor = float3(0.5, 0.7, 1.0);
+    float3 nightColor = float3(0.05, 0.1, 0.2);
+    
+    // smoothstep 是一個非常強大的圖學函數：
+    // 當太陽在 -0.2 (地平線下) 到 0.2 (地平線上) 之間時，產生 0.0 ~ 1.0 的平滑漸變
+    float mixFactor = smoothstep(-0.2, 0.2, sunHeight);
+    
+    // 根據太陽高度混合顏色
+    float3 finalColor = mix(nightColor, dayColor, mixFactor);
+    
+    // 輸出最終顏色，設定不透明度為 0.8
+    return float4(finalColor, 0.8);
 }
 
 
