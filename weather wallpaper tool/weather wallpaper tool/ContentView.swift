@@ -2,87 +2,96 @@ import SwiftUI
 import MetalKit
 
 struct ContentView: View {
+    // 預設將滑桿時間設為中午 12 點
+    @State private var timeOfDay: Float = 12.0
+    
     var body: some View {
-        MetalView()
-            .edgesIgnoringSafeArea(.all)
+        ZStack(alignment: .bottom) {
+            // 背景的 Metal 渲染層
+            MetalView(timeOfDay: $timeOfDay)
+                .ignoresSafeArea()
+            
+            // 浮動時間控制面板
+            VStack(spacing: 8) {
+                Text(String(format: "模擬時間: %02d:%02d", Int(timeOfDay), Int((timeOfDay - floor(timeOfDay)) * 60)))
+                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+                
+                Slider(value: $timeOfDay, in: 0...24)
+                    .tint(.orange)
+            }
+            .padding()
+            .background(Color.black.opacity(0.6))
+            .cornerRadius(12)
+            .padding(.bottom, 40)
+            .padding(.horizontal, 60)
+        }
     }
 }
 
 struct MetalView: NSViewRepresentable {
-    func makeNSView(context: Context) -> MTKView {
-        let mtkView = MTKView()
-        if let device = MTLCreateSystemDefaultDevice() {
-            mtkView.device = device
-        }
-        
-        // 測試：計算當下台中大里地區的太陽向量
-        let sunVec = SunMath.getSunVector(date: Date(), latitude: 24.1, longitude: 120.68)
-        print("🌞 當前太陽向量: \(sunVec)")
-        
-        let moonVec = MoonMath.getMoonVector(date: Date(), latitude: 24.1, longitude: 120.68)
-        print("🌙 當前月球向量: \(moonVec)")
-        
-        let phase = MoonMath.getMoonPhase(date: Date())
-        print("🌒 當前月相進度: \(phase) (0=新月, 0.5=滿月)")
-        
-        // 允許圖層透明
-        mtkView.wantsLayer = true
-        mtkView.layer?.isOpaque = false
-        mtkView.layer?.backgroundColor = NSColor.clear.cgColor
-        mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        
-        // 將渲染的控制權交給 Coordinator
-        mtkView.delegate = context.coordinator
-        return mtkView
-    }
-
-    func updateNSView(_ nsView: MTKView, context: Context) {}
+    @Binding var timeOfDay: Float
     
-    // 建立 Coordinator
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
+    }
+    
+    func makeNSView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.device = MTLCreateSystemDefaultDevice()
+        
+        // 🌟 確保像素格式與 Pipeline 匹配
+        view.colorPixelFormat = .bgra8Unorm
+        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        view.delegate = context.coordinator
+        return view
+    }
+    
+    func updateNSView(_ nsView: MTKView, context: Context) {
+        // 即時把 SwiftUI 的滑桿數值同步給 Coordinator
+        context.coordinator.parent = self
     }
 }
 
 class Coordinator: NSObject, MTKViewDelegate {
     var parent: MetalView
+    var device: MTLDevice!
     var commandQueue: MTLCommandQueue?
-    var pipelineState: MTLRenderPipelineState? // 新增：渲染管線狀態
+    var pipelineState: MTLRenderPipelineState?
+    let startDate = Date()
     
     init(_ parent: MetalView) {
         self.parent = parent
         super.init()
         
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        self.device = MTLCreateSystemDefaultDevice()
         self.commandQueue = device.makeCommandQueue()
         
-        // --- 新增：載入 Metal 檔案並建立渲染管線 ---
-        // 抓取專案裡的 default library (會自動編譯 .metal 檔)
-        guard let library = device.makeDefaultLibrary(),
-              let vertexFunction = library.makeFunction(name: "vertexMain"),
-              let fragmentFunction = library.makeFunction(name: "fragmentMain") else {
-            print("找不到 Shader 函數！請檢查命名。")
-            return
-        }
+        let library = device.makeDefaultLibrary()
+        let vertexFunction = library?.makeFunction(name: "vertexMain")
+        let fragmentFunction = library?.makeFunction(name: "fragmentMain")
         
-        // 設定管線的規則
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
         pipelineDescriptor.fragmentFunction = fragmentFunction
-        // 確保顏色格式與視圖一致
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        // 開啟 Alpha 混合 (Blending) 這樣才能呈現透明度！
+        
+        // 確保支援透明度混合，這樣才能隱約看見你的桌布底圖
         pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
         pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
         pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         
-        // 編譯這個管線狀態
-        self.pipelineState = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        do {
+            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            print("❌ Pipeline 編譯失敗: \(error)")
+        }
     }
     
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
     
     func draw(in view: MTKView) {
+        // 如果這裡 guard 失敗，畫面就會完全空白
         guard let drawable = view.currentDrawable,
               let passDescriptor = view.currentRenderPassDescriptor,
               let pipelineState = self.pipelineState else { return }
@@ -92,24 +101,28 @@ class Coordinator: NSObject, MTKViewDelegate {
         guard let commandBuffer = commandQueue?.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
         
-        // 1. 獲取當前即時的天體觀測數據（以台中大里座標為例）
-        var sunVector = SunMath.getSunVector(date: Date(), latitude: 24.1, longitude: 120.68)
-        var moonVector = MoonMath.getMoonVector(date: Date(), latitude: 24.1, longitude: 120.68)
-        var moonPhase = MoonMath.getMoonPhase(date: Date())
-        
-        var aspect = Float(view.drawableSize.width / view.drawableSize.height)
-        
         encoder.setRenderPipelineState(pipelineState)
         
-        // 2. 開通多軌數據通道
-        // Metal 的 float3 對齊格式為 16 bytes，Swift 的 SIMD3<Float> 跨距(stride)亦為 16 bytes，兩者完美對接
-        encoder.setFragmentBytes(&sunVector, length: MemoryLayout<SIMD3<Float>>.stride, index: 0)
-        encoder.setFragmentBytes(&moonVector, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-        encoder.setFragmentBytes(&moonPhase, length: MemoryLayout<Float>.size, index: 2)
+        // 🌟 防呆機制：確保高度大於 0，避免產生 NaN 黑洞
+        let width = Float(view.drawableSize.width)
+        let height = max(1.0, Float(view.drawableSize.height))
+        var aspect = width / height
         
-        encoder.setFragmentBytes(&aspect, length: MemoryLayout<Float>.size, index: 3)
+        // 讀取時間變數
+        let currentTime = parent.timeOfDay
+        let sunriseTime: Float = 5.5
+        let sunsetTime: Float = 18.5
+        var timeData = SIMD3<Float>(currentTime, sunriseTime, sunsetTime)
         
-        // 3. 執行繪圖
+        var elapsedTime = Float(Date().timeIntervalSince(startDate))
+        var moonPhase = MoonMath.getMoonPhase(date: Date())
+        
+        // 綁定 Buffer 通道
+        encoder.setFragmentBytes(&timeData, length: MemoryLayout<SIMD3<Float>>.stride, index: 0)
+        encoder.setFragmentBytes(&moonPhase, length: MemoryLayout<Float>.size, index: 1)
+        encoder.setFragmentBytes(&aspect, length: MemoryLayout<Float>.size, index: 2)
+        encoder.setFragmentBytes(&elapsedTime, length: MemoryLayout<Float>.size, index: 3)
+        
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         
         encoder.endEncoding()

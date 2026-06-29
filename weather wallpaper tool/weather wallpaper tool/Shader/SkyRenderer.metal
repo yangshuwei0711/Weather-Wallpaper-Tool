@@ -13,7 +13,13 @@ struct RasterizerData {
     float2 uv;
 };
 
-// 頂點著色器保持不變（生成全螢幕畫布）
+// 3D 空間雜訊函數
+float hash(float3 p) {
+    p = fract(p * float3(123.34, 456.21, 789.12));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y * p.z);
+}
+
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     float2 positions[3] = {
         float2(-1.0, -1.0),
@@ -27,61 +33,137 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-// 片段著色器：球面幾何與天體光學計算
 fragment float4 fragmentMain(RasterizerData in [[stage_in]],
-                             constant float3& sunDirection [[buffer(0)]],
-                             constant float3& moonDirection [[buffer(1)]],
-                             constant float& moonPhase [[buffer(2)]],
-                             constant float& aspect [[buffer(3)]]) {
+                             constant float3& timeData [[buffer(0)]],
+                             constant float& moonPhase [[buffer(1)]],
+                             constant float& aspect [[buffer(2)]],
+                             constant float& time [[buffer(3)]]) {
 
-    // 1. 建立 1:1 的完美物理畫布 (保證畫出來的距離計算絕對是正圓)
     float2 uv = in.uv * 2.0 - 1.0;
-    uv.x *= aspect; // X 軸乘上螢幕比例，徹底抵銷任何螢幕拉伸
+    uv.y = -uv.y;
+    uv.x *= aspect;
+    
+    // 🌟 幾何修正：將自轉軸心下移，確保天體最高點剛好切齊螢幕頂部，不會飛出邊框
+    float2 origin = float2(0.0, -0.65);
+    
+    // 新的半徑計算 (因為地平線在 y = -1.0，所以與 origin 現在差了 0.35 的高度)
+    float orbitRadius = sqrt(aspect * aspect + 0.35 * 0.35);
+    float alpha = atan2(0.35, aspect);
 
-    // 2. 畫布底色 (保留日夜漸層)
-    float sunHeight = sunDirection.y;
-    float3 daySky = float3(0.4, 0.65, 0.95);
-    float3 nightSky = float3(0.02, 0.04, 0.08);
-    float skyMix = smoothstep(-0.2, 0.2, sunHeight);
-    float3 finalColor = mix(nightSky, daySky, skyMix);
+    float currentTime = timeData.x;
+    float sunrise = timeData.y;
+    float sunset = timeData.z;
+
+    float sunAngle = 0.0;
+    if (currentTime >= sunrise && currentTime <= sunset) {
+        float progress = (currentTime - sunrise) / (sunset - sunrise);
+        sunAngle = mix(-alpha, 3.1415926 + alpha, progress);
+    } else {
+        float nightLength = 24.0 - (sunset - sunrise);
+        float elapsedNight = (currentTime > sunset) ? (currentTime - sunset) : (currentTime + 24.0 - sunset);
+        float nightProgress = elapsedNight / nightLength;
+        sunAngle = mix(3.1415926 + alpha, 2.0 * 3.1415926 - alpha, nightProgress);
+    }
+
+    float2 sunPos = origin + float2(cos(sunAngle) * orbitRadius, sin(sunAngle) * orbitRadius);
+    
+    // 🌟 修正 1：利用真實月相計算月球的 2D 軌道落後角度
+    float moonAngle = sunAngle - (moonPhase * 6.283185);
+    float2 moonPos = origin + float2(cos(moonAngle) * orbitRadius, sin(moonAngle) * orbitRadius);
+
+    float3 daySky = float3(0.12, 0.42, 0.82);
+    float3 nightSky = float3(0.008, 0.012, 0.025);
+    float skyProgress = smoothstep(0.0, 0.5, sunPos.y + 1.0);
+    float3 finalColor = mix(nightSky, daySky, skyProgress);
 
     // ---------------------------------------------------------
-    // 3. 你的好點子：2D 圓弧軌跡 (Screen-Space Billboard)
+    // 動態星空系統
     // ---------------------------------------------------------
+    float2 toPixel = uv - origin;
+    float cosS = cos(-sunAngle);
+    float sinS = sin(-sunAngle);
+    float2 rotatedUV = float2(
+        toPixel.x * cosS - toPixel.y * sinS,
+        toPixel.x * sinS + toPixel.y * cosS
+    );
     
-    // 直接拿 3D 向量的 x, y 當作螢幕上的 2D 座標，並稍微放大軌跡範圍讓它繞著螢幕跑
-    float arcWidth = 1.8;
-    float arcHeight = 1.5;
-    float2 moonPos = float2(moonDirection.x * arcWidth, moonDirection.y * arcHeight);
+    float2 starUV = rotatedUV * 26.0;
+    float2 gridID = floor(starUV);
+    float2 starLocalPos = fract(starUV) - 0.5;
     
-    // 計算當前像素到月亮中心的 2D 距離
+    float starExistence = hash(float3(gridID.x, gridID.y, 0.0));
+    float isStar = step(0.98, starExistence);
+
+    float offsetX = hash(float3(gridID.x, gridID.y, 1.0)) * 0.4 - 0.2;
+    float offsetY = hash(float3(gridID.x, gridID.y, 2.0)) * 0.4 - 0.2;
+    float distToStar = length(starLocalPos - float2(offsetX, offsetY));
+    
+    float sizeRandom = hash(float3(gridID.x, gridID.y, 3.0));
+    float starRadius = 0.03 + 0.12 * sizeRandom;
+    
+    float core = smoothstep(starRadius * 0.3, 0.0, distToStar);
+    float glow = smoothstep(starRadius * 1.8, 0.0, distToStar) * 0.5;
+    float starShape = core + glow;
+    
+    float colorRand = hash(float3(gridID.x, gridID.y, 4.0));
+    float3 blueStar = float3(0.65, 0.85, 1.0);
+    float3 redStar = float3(1.0, 0.65, 0.55);
+    float isRed = step(0.85, colorRand);
+    float3 starBaseColor = mix(blueStar, redStar, isRed);
+    starBaseColor *= (0.6 + 0.4 * hash(float3(gridID.x, gridID.y, 5.0)));
+    
+    float starVisibility = 1.0 - smoothstep(-0.05, 0.1, sunPos.y + 1.0);
+    finalColor += starBaseColor * starShape * isStar * 4.5 * starVisibility;
+
+    // ---------------------------------------------------------
+    // 銳利的瑞利散射大氣效果
+    // ---------------------------------------------------------
+    float3 twilightColor = float3(0.98, 0.22, 0.02);
+    float twilightIntensity = smoothstep(-0.2, 0.0, sunPos.y + 1.0) * (1.0 - smoothstep(0.0, 0.3, sunPos.y + 1.0));
+    float rayleighBelt = exp(-7.0 * (uv.y + 1.0));
+    finalColor += twilightColor * rayleighBelt * twilightIntensity * 3.0;
+
+    // ---------------------------------------------------------
+    // 2D 月球本體與真實月相陰影 (修正版)
+    // ---------------------------------------------------------
     float distToMoon = length(uv - moonPos);
-    float moonRadius = 0.08; // 鎖死月亮的大小
-
-    // 如果該像素在月亮半徑內
-    if (distToMoon < moonRadius) {
+    float moonRadius = 0.055;
+    if (distToMoon < moonRadius && moonPos.y > -1.2) {
+        float2 moonLocalPos = (uv - moonPos) / moonRadius;
+        float z = sqrt(max(0.0, 1.0 - dot(moonLocalPos, moonLocalPos)));
+        float3 fakeNormal = normalize(float3(moonLocalPos.x, moonLocalPos.y, z));
         
-        // 【圖學黑科技】：在 2D 平面圓形上，憑空捏造出 3D 立體法向量！
-        // 這樣我們就不需要真正的 3D 球體，也能算出完美的月相盈虧
-        float2 localPos = (uv - moonPos) / moonRadius; // 將座標映射到 -1 ~ 1
-        float z = sqrt(max(0.0, 1.0 - dot(localPos, localPos))); // 利用畢氏定理算出球面凸起的 Z 軸
-        float3 fakeNormal = normalize(float3(localPos.x, localPos.y, z));
-
-        // 用這顆捏造的 3D 法向球去接太陽光，算出真實的月相陰影
-        float illumination = max(0.12, dot(fakeNormal, sunDirection));
-        float3 moonBodyColor = float3(1.2, 1.2, 1.1) * illumination;
-
-        // 抗鋸齒：讓圓形的邊緣平滑過渡，不要有像素狗牙
+        // 🌟 修正 2：利用月相，在 3D 空間中捏造一個精準的虛擬太陽光方向
+        float phaseAngle = moonPhase * 6.283185;
+        // cos 前面的負號確保當 phase = 0.5 (滿月) 時，光從螢幕正前方 (z = 1.0) 打過來
+        float3 phaseLightDir = normalize(float3(sin(phaseAngle), 0.0, -cos(phaseAngle)));
+        
+        // 將最低亮度提升至 0.18，確保暗面能透出微微的「地照」輪廓
+        float illumination = max(0.18, dot(fakeNormal, phaseLightDir));
+        float3 moonBodyColor = float3(1.3, 1.3, 1.2) * illumination;
+        
         float alpha = smoothstep(moonRadius, moonRadius - 0.002, distToMoon);
         finalColor = mix(finalColor, moonBodyColor, alpha);
     }
-    
-    // --- 附贈：太陽的光暈也可以用相同的 2D 邏輯畫出來 ---
-    float2 sunPos = float2(sunDirection.x * arcWidth, sunDirection.y * arcHeight);
+
+    // ---------------------------------------------------------
+    // 7. 2D 太陽本體與大氣耀光
+    // ---------------------------------------------------------
     float distToSun = length(uv - sunPos);
-    float sunGlow = pow(max(0.0, 1.0 - distToSun * 0.6), 5.0); // 太陽的擴散光暈
-    finalColor += float3(1.0, 0.75, 0.45) * sunGlow * max(0.0, skyMix);
+    
+    // 1. 縮小太陽本體 (從 0.06 降到 0.025)
+    float sunRadius = 0.02;
+    float sunBody = smoothstep(sunRadius, sunRadius - 0.003, distToSun);
+    
+    // 2. 收束光暈範圍：將 distToSun 乘以 0.8 (原本是 0.45) 讓光暈衰減得更快
+    float sunGlow = pow(max(0.0, 1.0 - distToSun * 2), 8.0);
+    float3 sunGlowColor = mix(float3(1.0, 0.15, 0.0), float3(1.0, 0.92, 0.65), smoothstep(0.0, 0.3, sunPos.y + 1.0));
+    
+    if (sunPos.y > -1.2) {
+        // 微調耀光強度 (1.8 降為 1.5)
+        finalColor += sunGlowColor * sunGlow * 1.5 * (sunPos.y + 1.2);
+        finalColor = mix(finalColor, float3(1.0, 1.0, 0.95), sunBody);
+    }
 
-    return float4(finalColor, 0.8);
+    return float4(finalColor, 0.85);
 }
-
